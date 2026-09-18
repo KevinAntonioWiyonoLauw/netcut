@@ -177,10 +177,16 @@ func run(log *slog.Logger, o options) error {
 	prev := map[string]arp.TargetStats{}
 	resolver := newNameResolver()
 
-	// Probe once up front so the first report is complete.
-	go func() {
-		eng.Probe(subnet, 3*time.Second)
-	}()
+	// Probe once up front so the first report is complete. In dry run the
+	// bindings come from the OS cache instead, so there is nothing to probe.
+	if !o.dryRun {
+		go func() {
+			eng.Probe(subnet, 3*time.Second)
+		}()
+	} else {
+		log.Warn("dry-run: discovery reads the operating system's ARP cache and " +
+			"nothing is transmitted; no enforcement will be applied")
+	}
 
 	for {
 		select {
@@ -201,7 +207,15 @@ func run(log *slog.Logger, o options) error {
 				eng.Probe(subnet, 3*time.Second)
 			}
 
-			neigh := eng.Neighbours()
+			var neigh []arp.Neighbour
+			if o.dryRun {
+				// Dry run must not transmit, so discovery reads the binding
+				// table the operating system has already learned. Nothing is
+				// sent and no capture handle is needed.
+				neigh = arpTableNeighbours(subnet)
+			} else {
+				neigh = eng.Neighbours()
+			}
 			devices := buildDevices(neigh, subnet, resolver)
 			stats := eng.Stats()
 			samples := diffSamples(prev, stats, o.interval)
@@ -228,6 +242,23 @@ func run(log *slog.Logger, o options) error {
 				"directives", len(resp.Directives))
 		}
 	}
+}
+
+// arpTableNeighbours converts the operating system's ARP cache into
+// neighbours, optionally limited to a subnet.
+func arpTableNeighbours(subnet *net.IPNet) []arp.Neighbour {
+	entries, err := netinfo.ARPTable()
+	if err != nil {
+		return nil
+	}
+	out := make([]arp.Neighbour, 0, len(entries))
+	for _, e := range entries {
+		if subnet != nil && !subnet.Contains(e.IP) {
+			continue
+		}
+		out = append(out, arp.Neighbour{MAC: e.MAC, IP: e.IP, Seen: time.Now()})
+	}
+	return out
 }
 
 // ---------------------------------------------------------------- helpers
@@ -509,6 +540,27 @@ func runCheck(log *slog.Logger) int {
 		fmt.Printf("\nselected: %s (%s) via gateway %s\n", best.Name, best.CIDR, best.Gateway)
 	} else {
 		fmt.Printf("\nno interface was selected automatically: %v\n", err)
+	}
+
+	// The ARP cache is readable without elevation, so it doubles as a
+	// no-transmit preview of what the agent would see.
+	fmt.Println("\nneighbours already known to this host (from the ARP cache):")
+	entries, err := netinfo.ARPTable()
+	if err != nil {
+		fmt.Printf("  could not read the ARP cache: %v\n", err)
+		return 0
+	}
+	if len(entries) == 0 {
+		fmt.Println("  (empty - run a scan, or use -dry-run and let the cache fill)")
+		return 0
+	}
+	fmt.Printf("  %-16s %-19s %s\n", "IP", "MAC", "VENDOR")
+	for _, e := range entries {
+		vendor := arp.VendorFor(e.MAC)
+		if vendor == "" {
+			vendor = "-"
+		}
+		fmt.Printf("  %-16s %-19s %s\n", e.IP, e.MAC, vendor)
 	}
 	return 0
 }

@@ -27,3 +27,9 @@
 *.log
 .DS_Store
 Thumbs.db
+
+# --- verification scratch (never commit) ---
+/vpub/
+/vtmp/
+/.verify/
+/.deploy/
