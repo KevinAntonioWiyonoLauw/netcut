@@ -1,0 +1,79 @@
+# ============================================================
+#  NetCut — network access control for a segment you own.
+#
+#  The control plane runs in this container. The data plane runs
+#  as a native agent on the host that owns the segment, because a
+#  NAT-ed container has no layer-2 reach into the LAN.
+#
+#  Quick start (single host, dashboard only):
+#    cp .env.example .env      # then edit it
+#    docker compose up -d
+#    open http://localhost:8080
+#
+#  To actually enforce, issue an agent credential in the dashboard
+#  and run the agent natively on the gateway host:
+#    netcut-agent -server http://<host>:8080 -token <credential>
+# ============================================================
+
+name: netcut
+
+services:
+  netcut:
+    image: ${NETCUT_IMAGE:-ghcr.io/kevinantoniowiyonolauw/netcut:latest}
+    container_name: netcut
+    restart: unless-stopped
+
+    environment:
+      NETCUT_ADDR: ":8080"
+      NETCUT_DB: /data/netcut.db
+      NETCUT_DATA_DIR: /data
+      # Required. Generate with: openssl rand -hex 32
+      NETCUT_JWT_SECRET: ${NETCUT_JWT_SECRET:?set NETCUT_JWT_SECRET in .env}
+      # Created on first boot, then never touched again.
+      NETCUT_ADMIN_EMAIL: ${NETCUT_ADMIN_EMAIL:-}
+      NETCUT_ADMIN_PASSWORD: ${NETCUT_ADMIN_PASSWORD:-}
+      # Must match the browser-visible origin, including the scheme.
+      NETCUT_PUBLIC_URL: ${NETCUT_PUBLIC_URL:-}
+      NETCUT_TOKEN_TTL: ${NETCUT_TOKEN_TTL:-12h}
+      NETCUT_POLL_INTERVAL: ${NETCUT_POLL_INTERVAL:-2s}
+      NETCUT_SCAN_INTERVAL: ${NETCUT_SCAN_INTERVAL:-30s}
+      NETCUT_SAMPLE_RETENTION: ${NETCUT_SAMPLE_RETENTION:-24h}
+      NETCUT_LOG_LEVEL: ${NETCUT_LOG_LEVEL:-info}
+      # Safe to keep true behind Traefik/Cloudflare: the edge overwrites
+      # X-Forwarded-For, so the client address used for rate limiting is real.
+      NETCUT_TRUSTED_PROXY: "true"
+      TZ: ${TZ:-Asia/Jakarta}
+
+    volumes:
+      - netcut-data:/data
+
+    ports:
+      # Bound to loopback by default: reach it through the reverse proxy, or
+      # change to "8080:8080" for a direct LAN-only deployment.
+      - "${NETCUT_BIND:-127.0.0.1}:${NETCUT_PORT:-8080}:8080"
+
+    # Unprivileged, read-only root filesystem, no new privileges. /data stays
+    # writable through the named volume and a tmpfs covers /tmp.
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/netcut", "-healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  netcut-data:

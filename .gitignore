@@ -1,0 +1,29 @@
+# --- build output ---
+/netcut
+/netcut-agent
+/netcut.exe
+/netcut-agent.exe
+/dist/
+/build/
+*.test
+
+# --- runtime data ---
+*.db
+*.db-shm
+*.db-wal
+/data/
+
+# --- secrets: never commit these ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!*.pub.pem
+
+# --- scratch ---
+/smoke*
+/tmp/
+*.log
+.DS_Store
+Thumbs.db

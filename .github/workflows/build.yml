@@ -1,0 +1,169 @@
+name: build
+
+# Builds the control-plane image and the agent binaries, then publishes the
+# image to GitHub Container Registry as a multi-arch manifest.
+#
+# Publishing rules:
+#   * push to main          -> :latest, :main, :sha-<short>
+#   * tag vX.Y.Z            -> :X.Y.Z, :X.Y, :latest, :sha-<short>
+#   * pull request          -> build only, no push
+#
+# The image is multi-arch (amd64 + arm64) so it runs natively on a small
+# always-on box as well as on a desktop.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    name: test and vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Verify modules are tidy
+        run: |
+          go mod tidy
+          if ! git diff --quiet -- go.mod go.sum; then
+            echo "::error::go.mod/go.sum are not tidy; run 'go mod tidy' and commit"
+            git diff -- go.mod go.sum
+            exit 1
+          fi
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l . | grep -v '^$' || true)
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        # -unsafeptr=false: the Windows capture backend binds wpcap.dll directly
+        # through syscall, so C pointers legitimately cross the uintptr/pointer
+        # boundary. See internal/arp/capture_windows.go for the reasoning; every
+        # such value is a C pointer owned by wpcap, never a Go heap address.
+        run: go vet -unsafeptr=false ./...
+
+      - name: Test
+        run: go test -race -count=1 ./...
+
+      - name: Build (linux/amd64)
+        run: go build -trimpath ./...
+
+      - name: Build (windows/amd64)
+        run: |
+          GOOS=windows GOARCH=amd64 go build -trimpath -o /dev/null ./cmd/netcut-agent
+
+  image:
+    name: publish image
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+            COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ github.event.repository.updated_at }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+  agent:
+    name: publish agent binaries
+    needs: test
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      matrix:
+        include:
+          - { goos: windows, goarch: amd64, ext: .exe }
+          - { goos: linux,   goarch: amd64, ext: "" }
+          - { goos: linux,   goarch: arm64, ext: "" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags "-s -w \
+              -X github.com/kevinantoniowiyonolauw/netcut/internal/version.Version=${GITHUB_REF_NAME} \
+              -X github.com/kevinantoniowiyonolauw/netcut/internal/version.Commit=${GITHUB_SHA}" \
+            -o "dist/netcut-agent-${GOOS}-${GOARCH}${{ matrix.ext }}" ./cmd/netcut-agent
+          go build -trimpath \
+            -ldflags "-s -w \
+              -X github.com/kevinantoniowiyonolauw/netcut/internal/version.Version=${GITHUB_REF_NAME} \
+              -X github.com/kevinantoniowiyonolauw/netcut/internal/version.Commit=${GITHUB_SHA}" \
+            -o "dist/netcut-server-${GOOS}-${GOARCH}${{ matrix.ext }}" ./cmd/netcut
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: netcut-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
