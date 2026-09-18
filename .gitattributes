@@ -1,0 +1,24 @@
+# Normalise line endings so a checkout on any platform produces the same bytes.
+# Text files are stored with LF; the exceptions are Windows-only artefacts.
+* text=auto eol=lf
+
+*.go      text eol=lf
+*.md      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.json    text eol=lf
+*.html    text eol=lf
+*.mod     text eol=lf
+*.sum     text eol=lf
+Dockerfile text eol=lf
+LICENSE   text eol=lf
+
+# Windows-only binaries, should anyone commit one by mistake.
+*.exe     binary
+*.dll     binary
+*.sys     binary
+
+# Build and test artefacts that must never be diffed or merged as text.
+*.db      binary
+*.db-shm  binary
+*.db-wal  binary
