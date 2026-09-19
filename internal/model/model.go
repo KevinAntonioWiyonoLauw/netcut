@@ -2,7 +2,10 @@
 // Domain types shared by the control plane (server) and the data plane (agent).
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Role controls what an account may do.
 type Role string
@@ -39,6 +42,95 @@ type User struct {
 	LastLogin    time.Time `json:"last_login"`
 }
 
+// LinkKind is how a device is attached to the network.
+type LinkKind string
+
+const (
+	LinkUnknown LinkKind = "unknown"
+	LinkWLAN    LinkKind = "wlan" // Wi-Fi
+	LinkLAN     LinkKind = "lan"  // wired Ethernet
+	LinkWAN     LinkKind = "wan"  // the uplink itself
+	LinkVirtual LinkKind = "virtual"
+)
+
+// Connection describes how a device reaches the network.
+//
+// Two sources can fill this in: the data-plane agent, which knows the interface
+// it is bound to, and the router, which knows the port or SSID each client is
+// on. Router data wins when present because it is per-device and authoritative.
+type Connection struct {
+	Kind LinkKind `json:"kind"`
+	// Detail is the specific attachment: an SSID, "LAN1", "LAN2", or an
+	// interface name. Empty when only the kind is known.
+	Detail string `json:"detail,omitempty"`
+	// Band is the radio band for a wireless link ("2.4G", "5G").
+	Band string `json:"band,omitempty"`
+	// Port is the switch port label for a wired link ("LAN1").
+	Port string `json:"port,omitempty"`
+	// Rate is the negotiated link rate or the reported Wi-Fi rate.
+	Rate string `json:"rate,omitempty"`
+	// Signal is the reported signal strength, when the router provides it.
+	Signal string `json:"signal,omitempty"`
+	// Source records where this came from: "router", "agent", or "".
+	Source string `json:"source,omitempty"`
+}
+
+// Label renders a short human-readable form for the dashboard.
+func (c Connection) Label() string {
+	if c.Kind == "" || c.Kind == LinkUnknown {
+		return ""
+	}
+	s := string(c.Kind)
+	if c.Kind == LinkWLAN {
+		if c.Detail != "" {
+			s += " · " + c.Detail
+		}
+		if c.Band != "" {
+			s += " (" + c.Band + ")"
+		}
+		return s
+	}
+	if c.Port != "" {
+		return string(c.Kind) + " · " + c.Port
+	}
+	if c.Detail != "" {
+		return string(c.Kind) + " · " + c.Detail
+	}
+	return s
+}
+
+// ClassifyLink decides how an interface attaches a host to the network, from
+// its name and description.
+//
+// The agent uses this to describe its own attachment, which in turn gives every
+// device it reports a baseline link kind: a device seen by an agent bound to a
+// wireless interface is on Wi-Fi unless the router says otherwise.
+//
+// Ordering matters: a virtual adapter is reported before a wired one, because
+// names like "vEthernet (WSL)" contain both markers and the virtual reading is
+// the correct one.
+func ClassifyLink(name, desc string) LinkKind {
+	s := strings.ToLower(name + " " + desc)
+	switch {
+	case strings.Contains(s, "wi-fi") || strings.Contains(s, "wifi") ||
+		strings.Contains(s, "wlan") || strings.Contains(s, "wireless") ||
+		strings.Contains(s, "802.11"):
+		return LinkWLAN
+	case strings.Contains(s, "vethernet") || strings.Contains(s, "hyper-v") ||
+		strings.Contains(s, "virtualbox") || strings.Contains(s, "vmware") ||
+		strings.Contains(s, "docker") || strings.Contains(s, "wsl") ||
+		strings.Contains(s, "tap-") || strings.Contains(s, "tun") ||
+		strings.Contains(s, "loopback") || strings.Contains(s, "vpn"):
+		return LinkVirtual
+	case strings.Contains(s, "ethernet") || strings.Contains(s, "eth") ||
+		strings.Contains(s, "lan") || strings.Contains(s, "realtek") ||
+		strings.Contains(s, "intel") || strings.Contains(s, "gbe") ||
+		strings.Contains(s, "802.3"):
+		return LinkLAN
+	}
+	return LinkUnknown
+}
+
 // Device is a host observed on the monitored segment.
 type Device struct {
 	MAC      string `json:"mac"`
@@ -58,15 +150,17 @@ type Device struct {
 	// Throttled is the operator's explicit persistent bandwidth cap.
 	Throttled bool `json:"throttled"`
 	// Runtime state mirrored back from the agent.
-	ArpPoisoned bool      `json:"arp_poisoned"`
-	RxBps       uint64    `json:"rx_bps"`
-	TxBps       uint64    `json:"tx_bps"`
-	RTTms       float64   `json:"rtt_ms"`
-	Packets     uint64    `json:"packets"`
-	BytesRx     uint64    `json:"bytes_rx"`
-	BytesTx     uint64    `json:"bytes_tx"`
-	FirstSeen   time.Time `json:"first_seen"`
-	LastSeen    time.Time `json:"last_seen"`
+	ArpPoisoned bool    `json:"arp_poisoned"`
+	RxBps       uint64  `json:"rx_bps"`
+	TxBps       uint64  `json:"tx_bps"`
+	RTTms       float64 `json:"rtt_ms"`
+	Packets     uint64  `json:"packets"`
+	BytesRx     uint64  `json:"bytes_rx"`
+	BytesTx     uint64  `json:"bytes_tx"`
+	// Connection is how the device is attached (Wi-Fi or a wired port).
+	Connection Connection `json:"connection"`
+	FirstSeen  time.Time  `json:"first_seen"`
+	LastSeen   time.Time  `json:"last_seen"`
 }
 
 // DisplayName returns the best human label for a device.
@@ -157,20 +251,25 @@ type AgentToken struct {
 
 // AgentInfo is the heartbeat payload an agent reports.
 type AgentInfo struct {
-	AgentID  string    `json:"agent_id"`
-	Name     string    `json:"name"`
-	Version  string    `json:"version"`
-	Iface    string    `json:"iface"`
-	Subnet   string    `json:"subnet"`
-	Gateway  string    `json:"gateway"`
-	LocalIP  string    `json:"local_ip"`
-	LocalMAC string    `json:"local_mac"`
-	OS       string    `json:"os"`
-	Elevated bool      `json:"elevated"`
-	CapAR    bool      `json:"cap_arp"`
-	CapQoS   bool      `json:"cap_qos"`
-	Devices  int       `json:"devices"`
-	TS       time.Time `json:"ts"`
+	AgentID string `json:"agent_id"`
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Iface   string `json:"iface"`
+	// IfaceKind is how this agent's own host is attached: wlan or lan. It
+	// becomes the baseline link kind for every device this agent reports,
+	// because an agent bound to a wireless interface can only see wireless
+	// clients. The router, when configured, overrides it per device.
+	IfaceKind LinkKind  `json:"iface_kind"`
+	Subnet    string    `json:"subnet"`
+	Gateway   string    `json:"gateway"`
+	LocalIP   string    `json:"local_ip"`
+	LocalMAC  string    `json:"local_mac"`
+	OS        string    `json:"os"`
+	Elevated  bool      `json:"elevated"`
+	CapAR     bool      `json:"cap_arp"`
+	CapQoS    bool      `json:"cap_qos"`
+	Devices   int       `json:"devices"`
+	TS        time.Time `json:"ts"`
 }
 
 // Directive is one enforcement instruction the control plane hands an agent.

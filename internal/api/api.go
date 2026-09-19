@@ -20,6 +20,7 @@ import (
 	"github.com/kevinantoniowiyonolauw/netcut/internal/fleet"
 	"github.com/kevinantoniowiyonolauw/netcut/internal/hub"
 	"github.com/kevinantoniowiyonolauw/netcut/internal/model"
+	"github.com/kevinantoniowiyonolauw/netcut/internal/router"
 	"github.com/kevinantoniowiyonolauw/netcut/internal/store"
 	"github.com/kevinantoniowiyonolauw/netcut/internal/version"
 )
@@ -42,23 +43,28 @@ type Server struct {
 	limiter *auth.Limiter
 	log     *slog.Logger
 	assets  http.Handler
-	mux     *http.ServeMux
+	// routerPoller is nil when router polling is not configured. It is only
+	// ever read for status; nothing on the request path depends on it.
+	routerPoller *router.Poller
+	mux          *http.ServeMux
 }
 
 // New builds the server and registers every route.
 func New(cfg *config.Config, st *store.Store, fl *fleet.Fleet, h *hub.Hub,
-	issuer *auth.Issuer, log *slog.Logger, assets http.Handler) *Server {
+	issuer *auth.Issuer, log *slog.Logger, assets http.Handler,
+	poller *router.Poller) *Server {
 
 	s := &Server{
-		cfg:     cfg,
-		st:      st,
-		fl:      fl,
-		hub:     h,
-		issuer:  issuer,
-		limiter: auth.NewLimiter(cfg.MaxLoginFails, cfg.LockoutWindow),
-		log:     log,
-		assets:  assets,
-		mux:     http.NewServeMux(),
+		cfg:          cfg,
+		st:           st,
+		fl:           fl,
+		hub:          h,
+		issuer:       issuer,
+		limiter:      auth.NewLimiter(cfg.MaxLoginFails, cfg.LockoutWindow),
+		log:          log,
+		assets:       assets,
+		routerPoller: poller,
+		mux:          http.NewServeMux(),
 	}
 	s.routes()
 	return s
@@ -89,6 +95,7 @@ func (s *Server) routes() {
 
 	m.HandleFunc("GET /api/state", s.requireAuth(s.handleState))
 	m.HandleFunc("GET /api/stats", s.requireAuth(s.handleStats))
+	m.HandleFunc("GET /api/router", s.requireAuth(s.handleRouterStatus))
 	m.HandleFunc("GET /api/ws", s.requireAuth(s.handleWS))
 
 	m.HandleFunc("GET /api/devices", s.requireAuth(s.handleListDevices))
@@ -512,6 +519,29 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"stats":  st,
 		"health": s.fl.Health(),
+		"router": s.routerStatus(),
+	})
+}
+
+// routerStatus returns the poller health, or a disabled marker.
+func (s *Server) routerStatus() any {
+	if s.routerPoller == nil {
+		return map[string]any{"configured": false}
+	}
+	return s.routerPoller.Status()
+}
+
+// handleRouterStatus reports whether router polling is working.
+//
+// This is the endpoint to check when devices show no link information: it says
+// whether a router is configured at all, which backend answered, and the last
+// error if a poll failed.
+func (s *Server) handleRouterStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"router": s.routerStatus(),
+		"hint": "Set NETCUT_ROUTER_HOST (and NETCUT_ROUTER_USER/PASSWORD) to have " +
+			"devices labelled as wlan or lan. Without it, only the agent's own " +
+			"attachment is known.",
 	})
 }
 

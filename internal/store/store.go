@@ -114,6 +114,13 @@ CREATE TABLE IF NOT EXISTS devices (
     packets      INTEGER NOT NULL DEFAULT 0,
     bytes_rx     INTEGER NOT NULL DEFAULT 0,
     bytes_tx     INTEGER NOT NULL DEFAULT 0,
+    conn_kind    TEXT NOT NULL DEFAULT '',
+    conn_detail  TEXT NOT NULL DEFAULT '',
+    conn_band    TEXT NOT NULL DEFAULT '',
+    conn_port    TEXT NOT NULL DEFAULT '',
+    conn_rate    TEXT NOT NULL DEFAULT '',
+    conn_signal  TEXT NOT NULL DEFAULT '',
+    conn_source  TEXT NOT NULL DEFAULT '',
     first_seen   INTEGER NOT NULL DEFAULT 0,
     last_seen    INTEGER NOT NULL DEFAULT 0
 );
@@ -187,7 +194,67 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
+	return s.addMissingColumns(ctx)
+}
+
+// addedColumns lists columns introduced after the first release. CREATE TABLE
+// IF NOT EXISTS does not touch an existing table, so a database created by an
+// earlier version needs each one added explicitly. Adding a column that is
+// already present is skipped, which keeps this idempotent.
+var addedColumns = map[string][]columnSpec{
+	"devices": {
+		{"conn_kind", "TEXT NOT NULL DEFAULT ''"},
+		{"conn_detail", "TEXT NOT NULL DEFAULT ''"},
+		{"conn_band", "TEXT NOT NULL DEFAULT ''"},
+		{"conn_port", "TEXT NOT NULL DEFAULT ''"},
+		{"conn_rate", "TEXT NOT NULL DEFAULT ''"},
+		{"conn_signal", "TEXT NOT NULL DEFAULT ''"},
+		{"conn_source", "TEXT NOT NULL DEFAULT ''"},
+	},
+}
+
+type columnSpec struct {
+	name string
+	decl string
+}
+
+func (s *Store) addMissingColumns(ctx context.Context) error {
+	for table, cols := range addedColumns {
+		existing, err := s.tableColumns(ctx, table)
+		if err != nil {
+			return err
+		}
+		for _, c := range cols {
+			if existing[c.name] {
+				continue
+			}
+			// The table and column names come from the constants above, never
+			// from input, so building this statement is safe.
+			stmt := "ALTER TABLE " + table + " ADD COLUMN " + c.name + " " + c.decl
+			if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+				return fmt.Errorf("add %s.%s: %w", table, c.name, err)
+			}
+		}
+	}
 	return nil
+}
+
+// tableColumns returns the column names of a table.
+func (s *Store) tableColumns(ctx context.Context, table string) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out[name] = true
+	}
+	return out, rows.Err()
 }
 
 // ---------- users ----------
@@ -327,14 +394,18 @@ func affected(res sql.Result, err error) error {
 // ---------- devices ----------
 
 const deviceCols = `mac,ip,hostname,vendor,alias,grp,note,online,protected,blocked,
-throttled,arp_poisoned,rx_bps,tx_bps,rtt_ms,packets,bytes_rx,bytes_tx,first_seen,last_seen`
+throttled,arp_poisoned,rx_bps,tx_bps,rtt_ms,packets,bytes_rx,bytes_tx,
+conn_kind,conn_detail,conn_band,conn_port,conn_rate,conn_signal,conn_source,
+first_seen,last_seen`
 
 func scanDevice(sc interface{ Scan(...any) error }) (*model.Device, error) {
 	var d model.Device
+	var c model.Connection
 	var first, last int64
 	err := sc.Scan(&d.MAC, &d.IP, &d.Hostname, &d.Vendor, &d.Alias, &d.Group, &d.Note,
 		&d.Online, &d.Protected, &d.Blocked, &d.Throttled, &d.ArpPoisoned,
 		&d.RxBps, &d.TxBps, &d.RTTms, &d.Packets, &d.BytesRx, &d.BytesTx,
+		&c.Kind, &c.Detail, &c.Band, &c.Port, &c.Rate, &c.Signal, &c.Source,
 		&first, &last)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -342,6 +413,7 @@ func scanDevice(sc interface{ Scan(...any) error }) (*model.Device, error) {
 	if err != nil {
 		return nil, err
 	}
+	d.Connection = c
 	d.FirstSeen = fromMS(first)
 	d.LastSeen = fromMS(last)
 	return &d, nil
@@ -367,7 +439,7 @@ func (s *Store) UpsertDevice(ctx context.Context, d *model.Device) error {
 	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO devices (`+deviceCols+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(mac) DO UPDATE SET
 			ip        = CASE WHEN excluded.ip       <> '' THEN excluded.ip       ELSE devices.ip       END,
 			hostname  = CASE WHEN excluded.hostname <> '' THEN excluded.hostname ELSE devices.hostname END,
@@ -377,7 +449,23 @@ func (s *Store) UpsertDevice(ctx context.Context, d *model.Device) error {
 		d.MAC, d.IP, d.Hostname, d.Vendor, d.Alias, d.Group, d.Note,
 		d.Online, d.Protected, d.Blocked, d.Throttled, d.ArpPoisoned,
 		d.RxBps, d.TxBps, d.RTTms, d.Packets, d.BytesRx, d.BytesTx,
+		d.Connection.Kind, d.Connection.Detail, d.Connection.Band, d.Connection.Port,
+		d.Connection.Rate, d.Connection.Signal, d.Connection.Source,
 		tms(d.FirstSeen), tms(d.LastSeen))
+	return err
+}
+
+// SetDeviceConnection records how a device is attached.
+//
+// It is deliberately separate from UpsertDevice: the connection is learned from
+// a different source (the router poller) than device identity, and a scan that
+// knows nothing about it must not blank what the router reported.
+func (s *Store) SetDeviceConnection(ctx context.Context, mac string, c model.Connection) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE devices SET conn_kind=?, conn_detail=?, conn_band=?, conn_port=?,
+			conn_rate=?, conn_signal=?, conn_source=?
+		WHERE mac=?`,
+		c.Kind, c.Detail, c.Band, c.Port, c.Rate, c.Signal, c.Source, normMAC(mac))
 	return err
 }
 

@@ -81,7 +81,9 @@ func (f *Fleet) Ingest(ctx context.Context, st *store.Store, rep model.AgentRepo
 		if mac == "" {
 			continue
 		}
-		if _, err := st.Device(ctx, mac); err != nil {
+		stored, err := st.Device(ctx, mac)
+		isNew := err != nil
+		if isNew {
 			firstSeen = append(firstSeen, d)
 		}
 		dd := d
@@ -89,6 +91,17 @@ func (f *Fleet) Ingest(ctx context.Context, st *store.Store, rep model.AgentRepo
 		dd.Online = true
 		if err := st.UpsertDevice(ctx, &dd); err != nil {
 			return err
+		}
+
+		// The agent knows only how *it* is attached, so its value is a
+		// baseline. It fills the gap when nothing better exists, and never
+		// overwrites what the router reported: the router knows the actual
+		// port or SSID per device, which the agent cannot see.
+		if !isNew && stored != nil && stored.Connection.Kind == "" &&
+			d.Connection.Kind != "" && d.Connection.Kind != model.LinkUnknown {
+			if err := st.SetDeviceConnection(ctx, mac, d.Connection); err != nil {
+				return err
+			}
 		}
 	}
 	if err := st.MarkOfflineExcept(ctx, keep); err != nil {
@@ -101,7 +114,7 @@ func (f *Fleet) Ingest(ctx context.Context, st *store.Store, rep model.AgentRepo
 	}
 	for _, d := range firstSeen {
 		_ = st.AddEvent(ctx, &model.Event{
-			Type: "device.discovered", Severity: "info", MAC: d.MAC,
+			Type: "device.discovered", Severity: "info", MAC: normMAC(d.MAC),
 			Message: "new device on the segment: " + label(d),
 			Actor:   "agent",
 		})

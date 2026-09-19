@@ -27,6 +27,7 @@ import (
 	"github.com/kevinantoniowiyonolauw/netcut/internal/fleet"
 	"github.com/kevinantoniowiyonolauw/netcut/internal/hub"
 	"github.com/kevinantoniowiyonolauw/netcut/internal/model"
+	"github.com/kevinantoniowiyonolauw/netcut/internal/router"
 	"github.com/kevinantoniowiyonolauw/netcut/internal/store"
 	"github.com/kevinantoniowiyonolauw/netcut/internal/version"
 )
@@ -94,7 +95,34 @@ func run(log *slog.Logger) error {
 	}
 
 	issuer := auth.NewIssuer(cfg.JWTSecret, cfg.TokenTTL)
-	srv := api.New(cfg, st, fl, h, issuer, log, assets)
+
+	// Router polling is optional. When configured it fills in how each device
+	// is attached (Wi-Fi or a wired port), which the control plane cannot know
+	// on its own. A failure here never prevents startup.
+	var poller *router.Poller
+	if cfg.RouterBackend != "none" && cfg.RouterHost != "" {
+		p, err := router.New(router.Config{
+			Backend:  cfg.RouterBackend,
+			Host:     cfg.RouterHost,
+			User:     cfg.RouterUser,
+			Password: cfg.RouterPassword,
+			Interval: cfg.RouterInterval,
+			Insecure: cfg.RouterInsecure,
+		}, st, log)
+		if err != nil {
+			log.Warn("router polling disabled", "err", err)
+		} else {
+			poller = p
+			log.Info("router polling enabled",
+				"backend", cfg.RouterBackend, "host", cfg.RouterHost,
+				"interval", cfg.RouterInterval)
+			go poller.Run(ctx)
+		}
+	} else {
+		log.Info("router polling not configured; devices will carry no connection label")
+	}
+
+	srv := api.New(cfg, st, fl, h, issuer, log, assets, poller)
 
 	go fl.Run(ctx, st, h, cfg.PollInterval, log)
 	go fl.RunMaintenance(ctx, st, cfg.SampleRetention, log)

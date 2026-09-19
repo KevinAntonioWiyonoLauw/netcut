@@ -95,6 +95,11 @@
   .pill.observe{background:rgba(96,165,250,.18);color:#93c5fd}
   .pill.allow{background:rgba(107,124,143,.14);color:var(--fg2)}
   .pill.prot{background:rgba(167,139,250,.18);color:#c4b5fd}
+  .pill.wlan{background:rgba(96,165,250,.18);color:#93c5fd}
+  .pill.lan{background:rgba(52,211,153,.16);color:#6ee7b7}
+  .pill.wan{background:rgba(167,139,250,.16);color:#c4b5fd}
+  .pill.virtual{background:rgba(107,124,143,.16);color:var(--fg2)}
+  .pill.unknown{background:rgba(107,124,143,.12);color:var(--fg3)}
   .acts{display:flex;gap:5px;flex-wrap:wrap}
   .empty{padding:28px 15px;text-align:center;color:var(--fg3)}
   .bar{height:5px;border-radius:3px;background:var(--bg3);overflow:hidden;min-width:54px}
@@ -184,10 +189,10 @@
       </h2>
       <div class="tw"><table>
         <thead><tr>
-          <th>Device</th><th>IP</th><th>MAC</th><th>Vendor</th><th>Group</th>
+          <th>Device</th><th>IP</th><th>MAC</th><th>Vendor</th><th>Link</th><th>Group</th>
           <th>State</th><th>Enforced</th><th>Down</th><th>Up</th><th>Session</th><th>Actions</th>
         </tr></thead>
-        <tbody id="devices"><tr><td colspan="11" class="empty">Loading…</td></tr></tbody>
+        <tbody id="devices"><tr><td colspan="12" class="empty">Loading…</td></tr></tbody>
       </table></div>
     </section>
   </main>
@@ -201,7 +206,7 @@
 /* ------------------------------------------------------------------ state */
 const S = {
   user: null, devices: [], decisions: {}, policies: [], overrides: {},
-  stats: null, health: null, agents: [], events: [], ws: null, timer: null,
+  stats: null, health: null, agents: [], events: [], router: null, ws: null, timer: null,
 };
 const $  = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
@@ -328,6 +333,7 @@ function applyState(m) {
   S.stats = m.stats || null;
   S.health = m.health || null;
   S.agents = m.agents || [];
+  S.router = m.router || null;
   S.decisions = {};
   (m.decisions || []).forEach((d) => { S.decisions[d.mac] = d; });
   render();
@@ -386,10 +392,20 @@ function renderBanners() {
   if (S.user && S.user.role === "viewer") {
     out.push(`<div class="banner warn">You are signed in as a <strong>viewer</strong>: the controls below are read-only.</div>`);
   }
-  const t = new Date();
-  const inWindow = (t.getHours() * 60 + t.getMinutes());
+  // Explain a missing link label rather than leaving the column blank.
+  const rt = S.router || {};
+  if (!rt.configured) {
+    out.push(`<div class="banner warn"><strong>Link information is unavailable.</strong>
+      Nothing is polling the router, so devices cannot be labelled <code>wlan</code> or <code>lan</code>.
+      Set <code>NETCUT_ROUTER_HOST</code> (and the router credentials) to enable it.</div>`);
+  } else if (rt.last_error) {
+    out.push(`<div class="banner warn"><strong>Router polling is failing.</strong>
+      <span class="mono">${esc(rt.backend || "")}</span> at <span class="mono">${esc(rt.host || "")}</span>:
+      ${esc(rt.last_error)}</div>`);
+  }
   const scheduled = S.policies.filter((p) => p.enabled && p.schedule);
   if (scheduled.length) {
+    const t = new Date();
     out.push(`<div class="banner warn">${scheduled.length} scheduled policy(ies) configured —
       the first match per device wins, highest priority first.
       Current local time ${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}.</div>`);
@@ -401,6 +417,32 @@ function decisionOf(mac) {
   return S.decisions[mac] || { action: "allow", source: "default", reason: "—" };
 }
 
+/* linkCell renders how a device is attached: Wi-Fi with its SSID and band, or a
+   wired port. It shows an explicit "unknown" marker rather than a blank, so a
+   missing router integration is visible instead of looking like an empty field. */
+function linkCell(d) {
+  const c = d.connection || {};
+  const kind = c.kind || "";
+  if (!kind || kind === "unknown") {
+    const hint = S.router && S.router.configured
+      ? "router polling is configured but has not reported this device"
+      : "set NETCUT_ROUTER_HOST to label devices as wlan or lan";
+    return `<span class="pill unknown" title="${esc(hint)}">unknown</span>`;
+  }
+  const cls = ["wlan", "lan", "wan", "virtual"].includes(kind) ? kind : "unknown";
+  const label = c.kind === "wlan"
+    ? (c.detail || "wlan") + (c.band ? " · " + c.band : "")
+    : (c.port || c.detail || kind);
+
+  const extra = [];
+  if (c.rate)   extra.push(c.rate);
+  if (c.signal) extra.push(c.signal);
+  if (c.source) extra.push("via " + c.source);
+
+  return `<span class="pill ${cls}" title="${esc(extra.join(" · "))}">${esc(label)}</span>`
+    + (extra.length ? `<div class="hint">${esc(extra.join(" · "))}</div>` : "");
+}
+
 function renderDevices() {
   const q = ($("#filter").value || "").toLowerCase().trim();
   const rows = S.devices
@@ -408,7 +450,9 @@ function renderDevices() {
     .sort((a, b) => (b.online - a.online) || a.mac.localeCompare(b.mac))
     .filter((d) => {
       if (!q) return true;
-      return [d.alias, d.hostname, d.vendor, d.ip, d.mac, d.group, d.note]
+      return [d.alias, d.hostname, d.vendor, d.ip, d.mac, d.group, d.note,
+              (d.connection || {}).kind, (d.connection || {}).detail,
+              (d.connection || {}).port]
         .filter(Boolean).join(" ").toLowerCase().includes(q);
     });
 
@@ -444,6 +488,7 @@ function renderDevices() {
       <td class="mono">${esc(d.ip || "—")}</td>
       <td class="mono">${esc(d.mac)}</td>
       <td>${esc(d.vendor || "—")}</td>
+      <td>${linkCell(d)}</td>
       <td>${esc(d.group || "—")}</td>
       <td><span class="pill ${actPill}">${esc(dec.action)}</span>
           <div class="hint" title="${esc(dec.reason || "")}">${esc((dec.source || "") + (ov ? " · timed" : ""))}</div></td>

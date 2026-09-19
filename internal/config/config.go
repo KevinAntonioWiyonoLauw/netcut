@@ -28,6 +28,15 @@ type Config struct {
 	TrustedProxy    bool
 	MaxLoginFails   int
 	LockoutWindow   time.Duration
+
+	// Router polling. Optional: with no router configured, devices simply
+	// carry no connection label and nothing else changes.
+	RouterBackend  string
+	RouterHost     string
+	RouterUser     string
+	RouterPassword string
+	RouterInterval time.Duration
+	RouterInsecure bool
 }
 
 // Load reads configuration from the environment, applying safe defaults.
@@ -50,6 +59,16 @@ func Load() (*Config, error) {
 		TrustedProxy:    envBool("NETCUT_TRUSTED_PROXY", true),
 		MaxLoginFails:   envInt("NETCUT_MAX_LOGIN_FAILS", 8),
 		LockoutWindow:   envDur("NETCUT_LOCKOUT_WINDOW", 10*time.Minute),
+
+		// Router polling is off unless both a backend and a host are given.
+		// Defaulting the backend to "auto" means setting only NETCUT_ROUTER_HOST
+		// is enough to turn it on.
+		RouterBackend:  env("NETCUT_ROUTER_BACKEND", "auto"),
+		RouterHost:     env("NETCUT_ROUTER_HOST", ""),
+		RouterUser:     env("NETCUT_ROUTER_USER", ""),
+		RouterPassword: os.Getenv("NETCUT_ROUTER_PASSWORD"),
+		RouterInterval: envDur("NETCUT_ROUTER_INTERVAL", 60*time.Second),
+		RouterInsecure: envBool("NETCUT_ROUTER_INSECURE", false),
 	}
 	if c.JWTSecret == "" {
 		return nil, fmt.Errorf("NETCUT_JWT_SECRET is required (generate one with: openssl rand -hex 32)")

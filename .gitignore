@@ -33,3 +33,6 @@ Thumbs.db
 /vtmp/
 /.verify/
 /.deploy/
+
+# --- local fake router used for integration checks ---
+/.fakerouter/

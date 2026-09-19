@@ -29,6 +29,9 @@ type stateEnvelope struct {
 	Stats     *store.Stats      `json:"stats"`
 	Health    any               `json:"health"`
 	Agents    []model.AgentInfo `json:"agents"`
+	// Router reports whether router polling is configured and working. The
+	// dashboard uses it to explain why a device has no link label.
+	Router any `json:"router"`
 }
 
 // buildState assembles the single payload that fully describes the fleet.
@@ -74,6 +77,7 @@ func (s *Server) buildState(r *http.Request) (*stateEnvelope, error) {
 		Stats:     stats,
 		Health:    s.fl.Health(),
 		Agents:    nonNilAgents(s.fl.Agents()),
+		Router:    s.routerStatus(),
 	}, nil
 }
 

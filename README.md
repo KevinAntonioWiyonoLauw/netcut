@@ -47,6 +47,9 @@ before any enforcement exists.
 ### Devices
 - Automatic discovery of every host on the segment, with vendor identification
   from the MAC prefix
+- **Link type** — each device is labelled `wlan` (with its SSID and band),
+  `lan` (with its switch port), or `wan`. Read from the router, so it is
+  per-device and authoritative
 - Live status, addresses, session age, and per-device throughput
 - Labels, groups, and free-form notes
 - **Protected devices** — a device marked protected is exempt from *every*
@@ -77,6 +80,56 @@ before any enforcement exists.
   `admin` (devices and policy), `viewer` (read-only)
 - Live dashboard over a WebSocket, plus a REST API
 - Bounded history: samples and events are pruned automatically
+
+## Link type: Wi-Fi or wired
+
+Knowing *how* a device is attached is what tells you whether to look at Wi-Fi or
+at a cable. NetCut gets this from two places, in order of authority:
+
+| Source | Knows | Fills in |
+|---|---|---|
+| **Router** (optional) | The actual SSID or switch port per client | `wlan · <SSID> (band)` or `lan · LAN1` |
+| **Agent** | Only its own attachment | A baseline for devices the router has not reported |
+
+The router is the only thing that can see a per-device attachment, so this needs
+it configured. Two backends are supported, plus auto-detection:
+
+```yaml
+environment:
+  - NETCUT_ROUTER_HOST=192.168.1.1      # turns polling on
+  - NETCUT_ROUTER_BACKEND=auto           # auto | huawei | openwrt | none
+  - NETCUT_ROUTER_USER=admin
+  - NETCUT_ROUTER_PASSWORD=...
+  - NETCUT_ROUTER_INTERVAL=60s
+```
+
+With `auto`, NetCut probes the known backends and uses the first that answers.
+Credentials are read-only: NetCut never changes router configuration.
+
+| Backend | For |
+|---|---|
+| `huawei` | Huawei home gateways (`/api/...` JSON API) |
+| `openwrt` | OpenWrt / LEDE, over ubus and iwinfo |
+| `none` | Disable polling |
+
+Two design choices worth knowing:
+
+- **Unknown is reported as unknown.** A device the router does not describe is
+  labelled `unknown`, never guessed. A wrong label is worse than no label.
+- **Field discovery is structural.** Router APIs differ by model and firmware
+  and are undocumented, so NetCut locates device records by finding MAC-shaped
+  values and reads the surrounding fields by name pattern. An unfamiliar router
+  still produces useful output.
+
+Check it any time:
+
+```bash
+curl -b jar http://localhost:8080/api/router
+```
+
+That reports whether polling is configured, which backend answered, how many
+clients it returned, and the last error if a poll failed. The dashboard shows
+the same thing as a banner, so a missing link column always explains itself.
 
 ## Quick start
 
@@ -168,6 +221,11 @@ list. The essentials:
 | `NETCUT_POLL_INTERVAL` | `2s` | How often intent is folded into directives. |
 | `NETCUT_SAMPLE_RETENTION` | `24h` | How much bandwidth history to keep. |
 | `NETCUT_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. |
+| `NETCUT_ROUTER_HOST` | — | Router address. Setting it enables link-type polling. |
+| `NETCUT_ROUTER_BACKEND` | `auto` | `auto`, `huawei`, `openwrt`, or `none`. |
+| `NETCUT_ROUTER_USER` | — | Router management user. |
+| `NETCUT_ROUTER_PASSWORD` | — | Router management password. |
+| `NETCUT_ROUTER_INTERVAL` | `60s` | How often to poll the router. |
 
 ## API
 
@@ -330,6 +388,7 @@ internal/hub/         WebSocket fan-out
 internal/model/       shared types
 internal/netinfo/     interface and gateway discovery
 internal/policy/      the decision engine
+internal/router/      router polling: link type per device
 internal/store/       SQLite persistence
 ```
 

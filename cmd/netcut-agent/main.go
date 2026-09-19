@@ -295,20 +295,21 @@ func selectIface(o options) (*netinfo.Iface, error) {
 
 func buildAgentInfo(agentID string, o options, iface *netinfo.Iface, subnet *net.IPNet, elevated bool, eng *arp.Engine) model.AgentInfo {
 	return model.AgentInfo{
-		AgentID:  agentID,
-		Name:     agentID,
-		Version:  version.Version,
-		Iface:    iface.Name,
-		Subnet:   subnet.String(),
-		Gateway:  iface.Gateway,
-		LocalIP:  iface.IP,
-		LocalMAC: iface.MAC,
-		OS:       runtime.GOOS + "/" + runtime.GOARCH,
-		Elevated: elevated,
-		CapAR:    !o.dryRun,
-		CapQoS:   !o.dryRun,
-		Devices:  len(eng.Neighbours()),
-		TS:       time.Now().UTC(),
+		AgentID:   agentID,
+		Name:      agentID,
+		Version:   version.Version,
+		Iface:     iface.Name,
+		IfaceKind: model.ClassifyLink(iface.Name, iface.IP),
+		Subnet:    subnet.String(),
+		Gateway:   iface.Gateway,
+		LocalIP:   iface.IP,
+		LocalMAC:  iface.MAC,
+		OS:        runtime.GOOS + "/" + runtime.GOARCH,
+		Elevated:  elevated,
+		CapAR:     !o.dryRun,
+		CapQoS:    !o.dryRun,
+		Devices:   len(eng.Neighbours()),
+		TS:        time.Now().UTC(),
 	}
 }
 
