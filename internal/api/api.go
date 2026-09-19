@@ -4,6 +4,7 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -150,6 +151,14 @@ func (s *Server) recoverer(next http.Handler) http.Handler {
 	})
 }
 
+// statusWriter records the response status for the access log.
+//
+// It must forward the optional interfaces a ResponseWriter can implement.
+// Embedding http.ResponseWriter alone is not enough: a handler that needs
+// Hijack (the WebSocket upgrade) or Flush (streaming) type-asserts the writer
+// it is given, and a wrapper that only embeds the interface hides them. That
+// made every WebSocket upgrade fail with "response does not implement
+// http.Hijacker", so the dashboard never received live updates.
 type statusWriter struct {
 	http.ResponseWriter
 	code int
@@ -159,6 +168,26 @@ func (w *statusWriter) WriteHeader(c int) {
 	w.code = c
 	w.ResponseWriter.WriteHeader(c)
 }
+
+// Hijack forwards to the underlying writer, so the WebSocket upgrade works.
+func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("the underlying ResponseWriter does not support hijacking")
+	}
+	return h.Hijack()
+}
+
+// Flush forwards to the underlying writer, for streaming responses.
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer, which is how
+// modern code should access optional behaviour.
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func (s *Server) logger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
