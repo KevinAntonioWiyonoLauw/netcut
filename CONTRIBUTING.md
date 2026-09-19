@@ -41,6 +41,19 @@ go test -race ./...
 
 CI runs exactly these, so a green local run means a green build.
 
+If you touch `go.mod`, regenerate `go.sum` for every shipped target rather than
+just your own platform:
+
+```powershell
+powershell -NoProfile -File .\tidy.ps1
+```
+
+`go mod tidy` resolves for the host platform only. This module builds for
+Windows (the agent binds Npcap through `syscall`) and for Linux (the
+control-plane image), so a Linux-only tidy drops hashes a Windows build needs
+and a Windows-only tidy adds ones Linux does not. `tidy.ps1` resolves all three
+targets and keeps the union, which is valid for each of them.
+
 Note on `-unsafeptr=false`: the Windows capture backend binds `wpcap.dll`
 directly through `syscall`, so C pointers legitimately cross the uintptr to
 pointer boundary. Every such value is a C pointer owned by the library, never a
