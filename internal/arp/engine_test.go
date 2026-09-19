@@ -251,7 +251,7 @@ func TestIPv4Dst(t *testing.T) {
 
 func TestVendorFor(t *testing.T) {
 	cases := map[string]string{
-		"00:11:22:33:44:55": "Huawei",
+		"00:e0:fc:12:34:56": "Huawei",
 		"b8:27:eb:12:34:56": "Raspberry Pi",
 		"08:00:27:aa:bb:cc": "VirtualBox",
 		"ac:bc:32:11:22:33": "Apple",
