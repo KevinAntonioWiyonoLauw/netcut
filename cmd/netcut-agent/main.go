@@ -172,6 +172,12 @@ func run(log *slog.Logger, o options) error {
 	defer tickerStop(tick)
 	probeTick := time.NewTicker(60 * time.Second)
 	defer tickerStop(probeTick)
+	// The control plane holds the agent registry in memory, so a restart of the
+	// server empties it. Reporting alone does not repopulate it, which left the
+	// dashboard showing an agent that was reporting while claiming none was
+	// registered. Re-registering periodically keeps the two in step.
+	helloTick := time.NewTicker(2 * time.Minute)
+	defer tickerStop(helloTick)
 
 	cycle := 0
 	prev := map[string]arp.TargetStats{}
@@ -199,6 +205,15 @@ func run(log *slog.Logger, o options) error {
 		case <-probeTick.C:
 			if o.probeEach > 0 {
 				eng.Probe(subnet, 3*time.Second)
+			}
+
+		case <-helloTick.C:
+			// Refresh the registration, and carry the current device count.
+			info := buildAgentInfo(agentID, o, iface, subnet, elevated, eng)
+			if err := postJSON(ctx, client, o.server+"/api/agent/hello", o.token, info, nil); err != nil {
+				log.Debug("heartbeat failed", "err", err)
+			} else {
+				log.Debug("heartbeat sent", "devices", info.Devices)
 			}
 
 		case <-tick.C:
