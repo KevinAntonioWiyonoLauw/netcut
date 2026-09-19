@@ -306,6 +306,9 @@ func (h *HuaweiONT) getTopo(ctx context.Context) ([]map[string]any, error) {
 	if status != http.StatusOK {
 		return nil, fmt.Errorf("getTopoInfo returned %d", status)
 	}
+	if looksLikeLoginPage(body) {
+		return nil, errSessionExpired
+	}
 	recs, err := parseONTScript(string(body))
 	if err != nil {
 		return nil, fmt.Errorf("parsing getTopoInfo: %w", err)
@@ -346,6 +349,9 @@ func (h *HuaweiONT) getEthPorts(ctx context.Context) ([]ethPort, error) {
 	if status != http.StatusOK {
 		return nil, fmt.Errorf("getEthInfo returned %d", status)
 	}
+	if looksLikeLoginPage(body) {
+		return nil, errSessionExpired
+	}
 	recs, err := parseONTScript(string(body))
 	if err != nil {
 		return nil, fmt.Errorf("parsing getEthInfo: %w", err)
@@ -363,13 +369,59 @@ func (h *HuaweiONT) getEthPorts(ctx context.Context) ([]ethPort, error) {
 	return ports, nil
 }
 
+// errSessionExpired signals that the gateway answered a data request with its
+// login page, meaning the session is no longer valid.
+//
+// This matters on this firmware because it permits only ONE admin session at a
+// time: any other login — including the operator opening the router's own web
+// UI — silently invalidates ours. Without detecting it, polling stays broken
+// until the cached session is discarded.
+var errSessionExpired = errors.New("the gateway session is no longer valid")
+
+// looksLikeLoginPage reports whether a response is the gateway's HTML login
+// page rather than data.
+//
+// These endpoints answer an unauthenticated request with an HTML page and
+// status 200, so the status code alone cannot distinguish it.
+func looksLikeLoginPage(body []byte) bool {
+	head := strings.ToLower(strings.TrimSpace(string(body)))
+	if head == "" {
+		return false
+	}
+	if strings.HasPrefix(head, "<!doctype") || strings.HasPrefix(head, "<html") {
+		return true
+	}
+	return strings.Contains(head, "txt_password") ||
+		strings.Contains(head, "<title>waiting...") ||
+		strings.Contains(head, "pagename")
+}
+
+// invalidate discards the cached session so the next call re-authenticates.
+func (h *HuaweiONT) invalidate() {
+	h.mu.Lock()
+	h.sid = ""
+	h.loginAt = time.Time{}
+	h.mu.Unlock()
+}
+
 // Clients reports how the gateway says clients are attached.
 //
-// On this firmware there is no per-device client table, so the result is
-// derived from the port state and the Wi-Fi station lists. The derivation is
-// deliberately conservative: a port is only attributed to devices when it is
-// the single active port.
+// A single-session gateway means our session can be invalidated at any time, so
+// an authentication failure is treated as recoverable: the session is
+// discarded, re-established, and the read retried once.
 func (h *HuaweiONT) Clients(ctx context.Context) (map[string]model.Connection, error) {
+	out, err := h.clientsOnce(ctx)
+	if errors.Is(err, errSessionExpired) {
+		h.invalidate()
+		if lerr := h.Login(ctx); lerr != nil {
+			return nil, fmt.Errorf("%w (re-login failed: %v)", errSessionExpired, lerr)
+		}
+		out, err = h.clientsOnce(ctx)
+	}
+	return out, err
+}
+
+func (h *HuaweiONT) clientsOnce(ctx context.Context) (map[string]model.Connection, error) {
 	out := map[string]model.Connection{}
 
 	// ---- wireless stations, when this model has radios ----
@@ -378,10 +430,15 @@ func (h *HuaweiONT) Clients(ctx context.Context) (map[string]model.Connection, e
 		for mac, c := range stations {
 			out[mac] = c
 		}
+	} else if errors.Is(err, errSessionExpired) {
+		return nil, err
 	}
 
 	// ---- wired ports ----
 	ports, err := h.getEthPorts(ctx)
+	if errors.Is(err, errSessionExpired) {
+		return nil, err
+	}
 	if err != nil && len(out) == 0 {
 		return nil, err
 	}

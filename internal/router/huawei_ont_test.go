@@ -154,6 +154,112 @@ func TestParseONTSEthPayload(t *testing.T) {
 	}
 }
 
+// TestONTRecoversFromAnInvalidatedSession is the failure seen in production.
+//
+// This firmware permits only one admin session at a time, so any other login —
+// the operator opening the router's own web UI, or a diagnostic script —
+// silently invalidates ours. Data requests then return the HTML login page with
+// status 200. The client must notice, re-authenticate, and retry rather than
+// staying broken until its cached session expires.
+func TestONTRecoversFromAnInvalidatedSession(t *testing.T) {
+	g := newFakeONT()
+	srv := startONT(t, g)
+
+	c := NewHuaweiONT(srv.URL, Config{User: g.user, Password: g.pass, Timeout: 5 * time.Second})
+	ctx := context.Background()
+
+	if err := c.Login(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Clients(ctx); err != nil {
+		t.Fatalf("first Clients: %v", err)
+	}
+	if len(c.Status().Ports) != 4 {
+		t.Fatalf("expected 4 ports on the first read")
+	}
+
+	// Another client logs in, which kills our session.
+	g.invalidateSession()
+
+	// The client must recover on its own.
+	clients, err := c.Clients(ctx)
+	if err != nil {
+		t.Fatalf("Clients did not recover from an invalidated session: %v", err)
+	}
+	_ = clients
+
+	st := c.Status()
+	if len(st.Ports) != 4 {
+		t.Fatalf("after recovery got %d ports, want 4", len(st.Ports))
+	}
+	if st.Ports[0].Status != "Up" || st.Ports[0].Speed != "1000 Mbps" {
+		t.Errorf("port 1 = %+v, want LAN1 Up 1000 Mbps", st.Ports[0])
+	}
+	if g.loginHits < 2 {
+		t.Errorf("login was attempted %d times, want at least 2 (initial + recovery)",
+			g.loginHits)
+	}
+}
+
+// TestONTReportsAnExpiredSessionWhenReLoginFails: if recovery is impossible the
+// error must say so, rather than looking like a malformed response.
+func TestONTReportsAnExpiredSessionWhenReLoginFails(t *testing.T) {
+	g := newFakeONT()
+	srv := startONT(t, g)
+
+	c := NewHuaweiONT(srv.URL, Config{User: g.user, Password: g.pass, Timeout: 5 * time.Second})
+	ctx := context.Background()
+	if err := c.Login(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Clients(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Kill the session and make re-login impossible too.
+	g.invalidateSession()
+	g.mu.Lock()
+	g.failLogin = true
+	g.mu.Unlock()
+
+	_, err := c.Clients(ctx)
+	if err == nil {
+		t.Fatal("Clients succeeded against a dead session with failing credentials")
+	}
+	if !strings.Contains(err.Error(), "no longer valid") {
+		t.Errorf("error does not identify the cause: %v", err)
+	}
+}
+
+// TestLooksLikeLoginPage pins what an invalidated session looks like on the
+// wire, since the status code is 200 in both cases.
+func TestLooksLikeLoginPage(t *testing.T) {
+	loginPages := []string{
+		`<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"><html>...`,
+		"<html><head><title>Waiting...</title></head></html>",
+		`<script>var pageName = '/';</script>`,
+		`<input id="txt_Password" type="password">`,
+	}
+	for _, p := range loginPages {
+		if !looksLikeLoginPage([]byte(p)) {
+			t.Errorf("looksLikeLoginPage(%q) = false, want true", p)
+		}
+	}
+
+	data := []string{
+		`[{APInst:"17",DevType:"EG8145V5"}]`,
+		`[{No:"1",EthType:"Lan",Status:"Up"}]`,
+		"",
+	}
+	for _, d := range data {
+		if looksLikeLoginPage([]byte(d)) {
+			t.Errorf("looksLikeLoginPage(%q) = true, want false", d)
+		}
+	}
+}
+
+// TestParseONTScriptRejectsGarbage covers the misleading error that started
+// this investigation: a login page reported as "no array in response".
 func TestParseONTScriptRejectsGarbage(t *testing.T) {
 	for _, in := range []string{
 		"",
@@ -227,6 +333,13 @@ type fakeONT struct {
 	failLogin  bool
 	loginHits  int
 	token      string
+	// singleSession reproduces the real firmware's behaviour of allowing only
+	// one admin session at a time: a new login invalidates the previous one.
+	singleSession bool
+	currentSID    string
+	// unauth makes every data endpoint answer with the login page, which is
+	// what an invalidated session looks like.
+	unauth bool
 }
 
 func newFakeONT() *fakeONT {
@@ -243,6 +356,15 @@ func newFakeONT() *fakeONT {
 			`{No:"3",EthType:"Lan",Enable:"1",Status:"Down",Speed:"0",Duplex:"--"},` +
 			`{No:"4",EthType:"Lan",Enable:"1",Status:"Up",Speed:"100",Duplex:"Full"}]`,
 	}
+}
+
+// invalidateSession simulates another client logging in, which on the real
+// firmware kills the session this client holds.
+func (g *fakeONT) invalidateSession() {
+	g.mu.Lock()
+	g.currentSID = ""
+	g.unauth = true
+	g.mu.Unlock()
 }
 
 func (g *fakeONT) handler() http.Handler {
@@ -290,6 +412,9 @@ func (g *fakeONT) handler() http.Handler {
 		sid := "5f3a91c2e07b48d6a1f0c93e7d2b845a6c1e09f3b7d248a5c6e1f09b3d7a2c48"
 		g.mu.Lock()
 		g.sessions[sid] = true
+		g.currentSID = sid
+		// A single-session gateway drops whatever session existed before.
+		g.unauth = false
 		g.mu.Unlock()
 		w.Header().Set("Set-Cookie",
 			"Cookie=sid="+sid+":Language:english:id=1;path=/")
@@ -297,12 +422,21 @@ func (g *fakeONT) handler() http.Handler {
 		fmt.Fprint(w, `<html><title>Waiting...</title></html>`)
 	})
 
+	// authed answers with data when the session is valid, and with the login
+	// page when it is not — exactly as the real firmware does.
 	authed := func(h func(w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
+			g.mu.Lock()
+			dead := g.unauth
+			current := g.currentSID
+			g.mu.Unlock()
+
 			c := r.Header.Get("Cookie")
-			if !strings.Contains(c, "sid=") || strings.Contains(c, "id=-1") {
+			if dead || current == "" || !strings.Contains(c, current) ||
+				strings.Contains(c, "id=-1") {
 				w.Header().Set("Content-Type", "text/html")
-				fmt.Fprint(w, `<html><title>Waiting...</title></html>`)
+				fmt.Fprint(w, `<html><head><title>Waiting...</title></head>`+
+					`<script>var pageName = '/';</script></html>`)
 				return
 			}
 			h(w, r)
