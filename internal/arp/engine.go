@@ -139,6 +139,11 @@ type Engine struct {
 	// uplinkHealthy records whether the gateway mapping is trustworthy. If the
 	// gateway itself is unreachable the engine must not cut the uplink.
 	uplinkHealthy bool
+
+	// writeHook, when set, replaces the capture device for outbound frames. It
+	// exists so tests can assert exactly what the engine would transmit, which
+	// is otherwise unobservable without putting frames on a real network.
+	writeHook func([]byte) error
 }
 
 type engineStats struct {
@@ -313,6 +318,22 @@ func (e *Engine) SetTargets(targets []Target) {
 		ts.shaperUp = newShaper(t.UpKbps, t.CapKbps)
 		ts.shaperDn = newShaper(t.CapKbps, t.UpKbps)
 	}
+}
+
+// Active reports how many targets are currently enforced.
+//
+// The caller uses this to decide whether a release is needed at all, and to
+// report what was released, so a failed poll does not trigger needless work.
+func (e *Engine) Active() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	n := 0
+	for _, ts := range e.targets {
+		if ts.active {
+			n++
+		}
+	}
+	return n
 }
 
 // RestoreAll releases every target without stopping the engine.
@@ -500,6 +521,18 @@ func (e *Engine) handleFrame(frame []byte) {
 
 	if etherType == etherTypeARP {
 		e.learnARP(frame)
+
+		// ARP must still be answered for anything under enforcement.
+		//
+		// Poisoning tells each side that the other lives at our MAC, so both
+		// sides periodically ask us to confirm it. Dropping those requests
+		// means the gateway cannot resolve a target and the target cannot
+		// resolve the gateway; both then retransmit broadcasts indefinitely,
+		// and a broadcast storm is processed by every device on the segment.
+		// That is how throttling one device degraded the whole network.
+		if e.arpMatters(frame) {
+			e.answerARP(frame)
+		}
 		return
 	}
 	if etherType != etherTypeIPv4 {
@@ -761,6 +794,9 @@ func (e *Engine) Probe(subnet *net.IPNet, timeout time.Duration) []Neighbour {
 // ---------------------------------------------------------------- frame I/O
 
 func (e *Engine) write(frame []byte) error {
+	if e.writeHook != nil {
+		return e.writeHook(frame)
+	}
 	if e.dev == nil || e.opts.DryRun {
 		return nil
 	}
@@ -870,6 +906,103 @@ func (s *shaper) allow(n int) bool {
 		return true
 	}
 	return false
+}
+
+// arpMatters reports whether an ARP frame relates to something we enforce and
+// therefore has to be carried rather than dropped.
+func (e *Engine) arpMatters(frame []byte) bool {
+	if len(frame) < 42 {
+		return false
+	}
+	arp := frame[14:]
+	spa := net.IP(arp[14:18]).To4() // sender protocol address
+	tpa := net.IP(arp[24:28]).To4() // target protocol address
+	if spa == nil || tpa == nil {
+		return false
+	}
+
+	// The gateway trying to reach a target we are enforcing: we must answer,
+	// otherwise it cannot resolve the target at all.
+	e.mu.RLock()
+	gwIP := e.gwIP
+	_, targetTPA := e.targetByIPLocked(tpa)
+	_, targetSPA := e.targetByIPLocked(spa)
+	e.mu.RUnlock()
+
+	if targetTPA {
+		return true
+	}
+	// A target looking for the gateway.
+	if targetSPA && gwIP != nil && tpa.Equal(gwIP) {
+		return true
+	}
+	return false
+}
+
+// targetByIPLocked is targetByIP without taking the lock, for callers that
+// already hold it.
+func (e *Engine) targetByIPLocked(ip net.IP) (*targetState, bool) {
+	if ip == nil {
+		return nil, false
+	}
+	key := ip.String()
+	for _, ts := range e.targets {
+		if ts.target.IP != nil && ts.target.IP.String() == key {
+			return ts, true
+		}
+	}
+	return nil, false
+}
+
+// answerARP replies to an ARP request that we are now the next hop for.
+//
+// This is not a courtesy: it is what keeps enforcement working. Poisoning tells
+// each side that the other lives at our MAC, so both sides periodically ask us
+// to confirm it. If the request goes unanswered the sender's entry expires, and
+// if it is answered with the truth the sender bypasses us and enforcement
+// silently stops. The reply therefore re-asserts the redirection, which is the
+// same claim the poison round makes — sent as a direct answer, which is what
+// makes it accepted.
+//
+// The two cases, both of which we are legitimately in the middle of:
+//
+//	the gateway asks who has a target   -> the target is at us
+//	a target asks who has the gateway   -> the gateway is at us
+func (e *Engine) answerARP(frame []byte) {
+	if len(frame) < 42 {
+		return
+	}
+	arp := frame[14:]
+	oper := uint16(arp[6])<<8 | uint16(arp[7])
+	if oper != 1 { // only requests are answered; replies are already handled
+		return
+	}
+	senderMAC := net.HardwareAddr(frame[6:12])
+	spa := net.IP(arp[14:18]).To4() // who is asking
+	tpa := net.IP(arp[24:28]).To4() // who they are asking about
+	if spa == nil || tpa == nil {
+		return
+	}
+	if senderMAC.String() == e.localMA.String() {
+		return
+	}
+
+	e.mu.RLock()
+	gwIP := e.gwIP
+	_, tpaIsTarget := e.targetByIPLocked(tpa)
+	_, spaIsTarget := e.targetByIPLocked(spa)
+	e.mu.RUnlock()
+
+	switch {
+	case tpaIsTarget:
+		// The gateway (or anyone) asking for a target we enforce: answer that
+		// the target is at our MAC, so the traffic keeps coming through us.
+		_ = e.sendARPReply(senderMAC, tpa, e.localMA, spa)
+	case spaIsTarget && gwIP != nil && tpa.Equal(gwIP):
+		// A target asking for the gateway: answer that the gateway is at our
+		// MAC, so its traffic keeps coming through us.
+		_ = e.sendARPReply(senderMAC, gwIP, e.localMA, spa)
+	}
 }
 
 // ---------------------------------------------------------------- helpers

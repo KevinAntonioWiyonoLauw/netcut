@@ -293,4 +293,10 @@ type AgentReport struct {
 	Samples []Sample          `json:"samples"`
 	Errors  []string          `json:"errors"`
 	Stats   map[string]uint64 `json:"stats,omitempty"`
+	// LocalMAC and LocalIP identify the agent's own host on the segment. The
+	// control plane uses them to keep that host permanently exempt from
+	// enforcement: it is the machine doing the redirecting, and the only route
+	// back to the dashboard to undo a mistake.
+	LocalMAC string `json:"local_mac,omitempty"`
+	LocalIP  string `json:"local_ip,omitempty"`
 }

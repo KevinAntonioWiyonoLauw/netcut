@@ -51,6 +51,22 @@ type options struct {
 	check     bool
 	verbose   bool
 	agentName string
+	// enforce must be set explicitly to apply blocking or throttling.
+	//
+	// ARP enforcement redirects a target's traffic through this host, so a
+	// mistake is not a bug in a dashboard — it is a broken network. Defaulting
+	// to observe-only means a fresh agent, a mistyped flag, or a restart after
+	// a crash cannot take the segment down on its own.
+	enforce bool
+	// maxEnforce bounds how long enforcement may run without a successful
+	// exchange with the control plane. It is the last line of defence: if the
+	// agent cannot hear that a rule was lifted, it stops enforcing anyway.
+	maxEnforce time.Duration
+	// releaseFile is a local kill switch. Creating this file makes the agent
+	// release every target immediately, without needing the network or the
+	// dashboard — which matters precisely when the agent has broken
+	// connectivity.
+	releaseFile string
 }
 
 func main() {
@@ -67,6 +83,9 @@ func main() {
 	flag.BoolVar(&o.check, "check", false, "print interface diagnostics and exit")
 	flag.BoolVar(&o.verbose, "verbose", envBool("NETCUT_VERBOSE", false), "debug logging")
 	flag.StringVar(&o.agentName, "name", envOr("NETCUT_AGENT_NAME", ""), "friendly name for this agent")
+	flag.BoolVar(&o.enforce, "enforce", envBool("NETCUT_ENFORCE", false), "actually apply block/throttle; without this the agent only observes and reports")
+	flag.DurationVar(&o.maxEnforce, "max-enforce", envDuration("NETCUT_MAX_ENFORCE", 10*time.Minute), "release every target if the control plane has been unreachable this long (0 disables)")
+	flag.StringVar(&o.releaseFile, "release-file", envOr("NETCUT_RELEASE_FILE", ""), "create this file to make the agent release everything immediately (default: <data dir>/RELEASE)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -132,12 +151,18 @@ func run(log *slog.Logger, o options) error {
 	log.Info("scan scope", "subnet", subnet.String())
 
 	// ---- engine ----
+	//
+	// The engine is put in dry-run mode unless enforcement is explicitly
+	// enabled. That keeps a single switch authoritative: there is no way to
+	// reach the poisoning code by accident, and -check or a first run can never
+	// disrupt the network.
+	enforcing := o.enforce && !o.dryRun
 	eng, err := arp.New(arp.Options{
 		Iface:   iface.Name,
 		LocalIP: localIP,
 		Gateway: gwIP,
 		Log:     log,
-		DryRun:  o.dryRun,
+		DryRun:  !enforcing,
 	})
 	if err != nil {
 		return err
@@ -149,6 +174,15 @@ func run(log *slog.Logger, o options) error {
 		return err
 	}
 	defer eng.Stop()
+
+	if enforcing {
+		log.Warn("ENFORCEMENT ENABLED: blocked or throttled devices will have their "+
+			"traffic redirected through this host",
+			"max_enforce", o.maxEnforce, "release_file", o.releaseFile)
+	} else {
+		log.Info("observe-only mode: the agent reports but never enforces " +
+			"(pass -enforce to apply block/throttle)")
+	}
 
 	agentID := o.agentName
 	if agentID == "" {
@@ -182,6 +216,9 @@ func run(log *slog.Logger, o options) error {
 	cycle := 0
 	prev := map[string]arp.TargetStats{}
 	resolver := newNameResolver()
+	// lastContact is when the control plane was last reached successfully, used
+	// to bound how long enforcement may outlive a lost connection.
+	lastContact := time.Now()
 
 	// Probe once up front so the first report is complete. In dry run the
 	// bindings come from the OS cache instead, so there is nothing to probe.
@@ -237,11 +274,13 @@ func run(log *slog.Logger, o options) error {
 			prev = indexStats(stats)
 
 			rep := model.AgentReport{
-				AgentID: agentID,
-				TS:      time.Now().UTC(),
-				Devices: devices,
-				Samples: samples,
-				Stats:   eng.EngineStats(),
+				AgentID:  agentID,
+				TS:       time.Now().UTC(),
+				Devices:  devices,
+				Samples:  samples,
+				Stats:    eng.EngineStats(),
+				LocalMAC: iface.MAC,
+				LocalIP:  localIP.String(),
 			}
 
 			var resp struct {
@@ -249,7 +288,42 @@ func run(log *slog.Logger, o options) error {
 			}
 			if err := postJSON(ctx, client, o.server+"/api/agent/report", o.token, rep, &resp); err != nil {
 				log.Warn("report failed", "err", err)
+
+				// Release enforcement while the control plane is unreachable.
+				//
+				// Continuing to enforce a rule we can no longer confirm is the
+				// worst case: the dashboard cannot lift it, and the operator
+				// cannot reach the dashboard anyway because this agent is
+				// already redirecting their traffic. Releasing restores normal
+				// connectivity, and enforcement resumes on the next good poll.
+				if enforcing {
+					if eng.Active() > 0 {
+						log.Warn("control plane unreachable: releasing all enforcement "+
+							"so connectivity is not left redirected", "targets", eng.Active())
+						eng.RestoreAll()
+					}
+					// Give up entirely if the outage outlasts maxEnforce.
+					if o.maxEnforce > 0 && time.Since(lastContact) > o.maxEnforce {
+						return fmt.Errorf("control plane unreachable for %s; stopping so "+
+							"enforcement cannot be left behind", o.maxEnforce)
+					}
+				}
 				continue
+			}
+			lastContact = time.Now()
+
+			// A local kill switch, checked every cycle. It needs no network and
+			// no dashboard, which is the point: it works when the agent has
+			// already broken connectivity.
+			if enforcing && o.releaseFile != "" {
+				if _, err := os.Stat(o.releaseFile); err == nil {
+					if eng.Active() > 0 {
+						log.Warn("release file present: releasing all enforcement",
+							"file", o.releaseFile)
+						eng.RestoreAll()
+					}
+					continue // ignore directives while the switch is held
+				}
 			}
 
 			eng.SetTargets(toTargets(resp.Directives))

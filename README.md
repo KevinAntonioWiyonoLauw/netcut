@@ -81,6 +81,40 @@ before any enforcement exists.
 - Live dashboard over a WebSocket, plus a REST API
 - Bounded history: samples and events are pruned automatically
 
+## Safety
+
+Enforcement redirects a device's traffic through the host running the agent. A
+mistake is therefore not a bug in a dashboard — it is a broken network, and it
+can break the very connection needed to undo it. NetCut is built around that:
+
+**Enforcement is opt-in.** The agent observes and reports by default. Nothing is
+blocked or throttled until you pass `-enforce` (or set `NETCUT_ENFORCE=true`).
+
+**Your own host is always exempt.** The agent reports its own MAC and IP with
+every report, and the control plane marks them protected automatically — every
+MAC seen at that address, since an address can appear with more than one on
+Windows. A protected device is exempt from every rule, schedule and manual
+action, so the machine doing the redirecting can never be cut off by it.
+
+**Three independent ways to stop enforcement:**
+
+| Method | Works when |
+|---|---|
+| Dashboard → **Panic release** | the network is still reachable |
+| Run `release-netcut.cmd` | **always** — it only creates a local file, so it works when the network is already broken |
+| Automatic | the agent cannot reach the control plane for `-max-enforce` (default 10 min), and it also releases immediately on any failed poll |
+
+The automatic release is the important one: an agent that keeps enforcing a rule
+it can no longer confirm is the worst case, because the dashboard cannot lift it
+and you cannot reach the dashboard to try.
+
+**Throttling one device must not degrade the segment.** Poisoning makes both the
+gateway and the device ask the agent to confirm the other's address. Those ARP
+requests are answered with the redirect re-asserted — not with the truth, which
+would silently end enforcement, and not dropped, which would leave both sides
+unable to resolve each other and retransmitting broadcasts until the whole
+segment slowed down.
+
 ## Link type: Wi-Fi or wired
 
 Knowing *how* a device is attached is what tells you whether to look at Wi-Fi or
@@ -245,6 +279,22 @@ list. The essentials:
 | `NETCUT_ROUTER_USER` | — | Router management user. |
 | `NETCUT_ROUTER_PASSWORD` | — | Router management password. |
 | `NETCUT_ROUTER_INTERVAL` | `60s` | How often to poll the router. |
+| `NETCUT_ENFORCE` | `false` | Actually apply block/throttle. Off means observe-only. |
+| `NETCUT_MAX_ENFORCE` | `10m` | Release everything if the control plane is unreachable this long. `0` disables. |
+| `NETCUT_RELEASE_FILE` | `<dir>/RELEASE` | Create this file to release everything immediately. |
+
+### Agent flags
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `-enforce` | off | Apply block/throttle. Without it the agent only reports. |
+| `-dry-run` | off | Never transmit at all, not even to enforce. |
+| `-max-enforce` | `10m` | Automatic release after this long without contact. |
+| `-release-file` | `<dir>/RELEASE` | Local kill switch path. |
+| `-check` | — | Print diagnostics and exit. |
+
+Running the agent with no flags is always safe: it discovers and reports, and
+transmits nothing.
 
 ## API
 

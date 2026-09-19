@@ -298,6 +298,51 @@ func TestSetTargetsRefusesToEnforceOurselves(t *testing.T) {
 	}
 }
 
+// TestActiveCountsEnforcedTargets: the agent uses this to decide whether a
+// release is needed, and to report what it released.
+func TestActiveCountsEnforcedTargets(t *testing.T) {
+	e, err := New(Options{LocalIP: net.ParseIP("192.168.1.9"), Log: discardLogger()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.localMA = mac(t, "11:22:33:44:55:66")
+	e.gwMAC = mac(t, "aa:aa:aa:aa:aa:aa")
+
+	if got := e.Active(); got != 0 {
+		t.Fatalf("Active() = %d with no targets, want 0", got)
+	}
+
+	e.SetTargets([]Target{
+		{MAC: mac(t, "bb:bb:bb:bb:bb:bb"), IP: net.ParseIP("192.168.1.50"), Mode: ModeBlock},
+		{MAC: mac(t, "cc:cc:cc:cc:cc:cc"), IP: net.ParseIP("192.168.1.51"), Mode: ModeThrottle, CapKbps: 256},
+	})
+	// Registered but not yet poisoned, so not active.
+	if got := e.Active(); got != 0 {
+		t.Errorf("Active() = %d before any poison round, want 0", got)
+	}
+
+	// Mark them poisoned the way a poison round does.
+	e.mu.Lock()
+	for _, ts := range e.targets {
+		ts.active = true
+	}
+	e.mu.Unlock()
+	if got := e.Active(); got != 2 {
+		t.Errorf("Active() = %d, want 2", got)
+	}
+
+	// Dropping the targets must take the count back to zero.
+	e.SetTargets(nil)
+	e.mu.Lock()
+	for _, ts := range e.targets {
+		ts.active = true
+	}
+	e.mu.Unlock()
+	if got := e.Active(); got != 0 {
+		t.Errorf("Active() = %d after clearing targets, want 0", got)
+	}
+}
+
 func TestSetTargetsIgnoresNonEnforcingModes(t *testing.T) {
 	e, err := New(Options{LocalIP: net.ParseIP("192.168.1.9"), Log: discardLogger()})
 	if err != nil {

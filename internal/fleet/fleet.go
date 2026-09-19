@@ -56,6 +56,16 @@ func (f *Fleet) SetAgent(info model.AgentInfo) {
 func (f *Fleet) Ingest(ctx context.Context, st *store.Store, rep model.AgentReport) error {
 	keep := make([]string, 0, len(rep.Devices))
 
+	// The agent's own host is never enforceable. Enforcement redirects a
+	// target's traffic through the agent, so poisoning the agent's own address
+	// would break the host that is doing the redirecting — the one machine that
+	// must keep working, and the only route back to the dashboard to undo it.
+	// Windows also cycles the source port of outgoing connections, so a single
+	// address can legitimately appear with several MACs; the guard covers all
+	// of them.
+	selfMAC := normMAC(rep.LocalMAC)
+	selfIP := strings.TrimSpace(rep.LocalIP)
+
 	f.mu.Lock()
 	for _, d := range rep.Devices {
 		mac := normMAC(d.MAC)
@@ -66,6 +76,12 @@ func (f *Fleet) Ingest(ctx context.Context, st *store.Store, rep model.AgentRepo
 		d.Online = true
 		if d.LastSeen.IsZero() {
 			d.LastSeen = time.Now().UTC()
+		}
+		if selfMAC != "" && mac == selfMAC {
+			d.Protected = true
+		}
+		if selfIP != "" && strings.TrimSpace(d.IP) == selfIP {
+			d.Protected = true
 		}
 		f.devices[mac] = d
 		keep = append(keep, mac)
@@ -89,6 +105,12 @@ func (f *Fleet) Ingest(ctx context.Context, st *store.Store, rep model.AgentRepo
 		dd := d
 		dd.MAC = mac
 		dd.Online = true
+		if selfMAC != "" && mac == selfMAC {
+			dd.Protected = true
+		}
+		if selfIP != "" && strings.TrimSpace(dd.IP) == selfIP {
+			dd.Protected = true
+		}
 		if err := st.UpsertDevice(ctx, &dd); err != nil {
 			return err
 		}
