@@ -128,6 +128,8 @@ func newClient(cfg Config) (Client, error) {
 	switch strings.ToLower(cfg.Backend) {
 	case "huawei":
 		return NewHuawei(host, cfg), nil
+	case "huawei-ont", "ont", "eg8145":
+		return NewHuaweiONT(host, cfg), nil
 	case "openwrt":
 		return NewOpenWrt(host, cfg), nil
 	case "auto":
@@ -135,7 +137,7 @@ func newClient(cfg Config) (Client, error) {
 		// blocks startup.
 		return NewAuto(host, cfg), nil
 	default:
-		return nil, fmt.Errorf("unknown router backend %q (use auto, huawei, openwrt or none)", cfg.Backend)
+		return nil, fmt.Errorf("unknown router backend %q (use auto, huawei, huawei-ont, openwrt or none)", cfg.Backend)
 	}
 }
 
@@ -211,6 +213,31 @@ func (p *Poller) recordErr(err error) {
 	p.log.Warn("router poll failed", "backend", p.backend, "host", p.client.Host(), "err", err)
 }
 
+// Status returns the current poller health.
+func (p *Poller) Status() Status {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	st := Status{
+		Configured: true,
+		Backend:    p.backend,
+		Host:       p.client.Host(),
+		LastOK:     p.lastOK,
+		LastError:  p.lastErr,
+		Clients:    p.lastN,
+		Attempts:   p.attempts,
+		Failures:   p.failures,
+	}
+	// A backend may have more to say than the generic status: the ONT backend
+	// knows the physical port state, which explains what it can and cannot
+	// attribute to a device.
+	if s, ok := p.client.(interface{ Status() ONTStatus }); ok {
+		ont := s.Status()
+		st.Ports = ont.Ports
+		st.SolePort = ont.SolePort
+	}
+	return st
+}
+
 // Status is the poller's health, for the dashboard.
 type Status struct {
 	Configured bool      `json:"configured"`
@@ -221,22 +248,11 @@ type Status struct {
 	Clients    int       `json:"clients"`
 	Attempts   uint64    `json:"attempts"`
 	Failures   uint64    `json:"failures"`
-}
-
-// Status returns the current poller health.
-func (p *Poller) Status() Status {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return Status{
-		Configured: true,
-		Backend:    p.backend,
-		Host:       p.client.Host(),
-		LastOK:     p.lastOK,
-		LastError:  p.lastErr,
-		Clients:    p.lastN,
-		Attempts:   p.attempts,
-		Failures:   p.failures,
-	}
+	// Ports is the physical port state, when the router reports it.
+	Ports []ONTPort `json:"ports,omitempty"`
+	// SolePort is set when exactly one port is up, in which case every wired
+	// device is on it.
+	SolePort model.Connection `json:"sole_port,omitempty"`
 }
 
 // ------------------------------------------------------------------ helpers

@@ -36,3 +36,18 @@ Thumbs.db
 
 # --- local fake router used for integration checks ---
 /.fakerouter/
+
+# --- local verification scratch (router payload captures etc.) ---
+/vui/
+/vcrawl/
+/vlogin*/
+/vprobe*/
+/vtopo/
+/vapinst/
+/vwl/
+/vfetch/
+/vlink*/
+/vfin*/
+/tmpcheck/
+/tmpdiag/
+/tmpont/

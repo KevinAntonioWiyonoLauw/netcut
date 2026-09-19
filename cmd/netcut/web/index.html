@@ -175,6 +175,7 @@
 
   <main>
     <div id="banners"></div>
+    <div id="ports"></div>
 
     <section>
       <div class="stats" id="stats"></div>
@@ -354,6 +355,8 @@ async function refresh() {
 function render() {
   renderStats();
   renderBanners();
+  const p = $("#ports");
+  if (p) p.innerHTML = portsPanel();
   renderDevices();
 }
 
@@ -425,7 +428,7 @@ function linkCell(d) {
   const kind = c.kind || "";
   if (!kind || kind === "unknown") {
     const hint = S.router && S.router.configured
-      ? "router polling is configured but has not reported this device"
+      ? "the router is configured but does not report a per-device attachment for this one"
       : "set NETCUT_ROUTER_HOST to label devices as wlan or lan";
     return `<span class="pill unknown" title="${esc(hint)}">unknown</span>`;
   }
@@ -441,6 +444,30 @@ function linkCell(d) {
 
   return `<span class="pill ${cls}" title="${esc(extra.join(" · "))}">${esc(label)}</span>`
     + (extra.length ? `<div class="hint">${esc(extra.join(" · "))}</div>` : "");
+}
+
+/* portsPanel shows the router's physical port state.
+
+   Some routers report which ports are live and at what speed, but do not say
+   which device is on which port. Showing the port state is honest and still
+   useful, and it explains why a device may carry no port label. */
+function portsPanel() {
+  const rt = S.router || {};
+  const ports = rt.ports || [];
+  if (!ports.length) return "";
+  const cells = ports.map((p) => {
+    const up = String(p.status).toLowerCase() === "up";
+    return `<span class="pill ${up ? "lan" : "unknown"}" title="${esc(
+      (p.type || "") + " " + (p.duplex || "")
+    )}">${esc(p.no)} ${esc(p.status)}${p.speed ? " · " + esc(p.speed) : ""}</span>`;
+  }).join(" ");
+  const sole = rt.sole_port && rt.sole_port.kind
+    ? `<div class="hint">Only ${esc(rt.sole_port.port || "one port")} is live, so every wired device is on it.</div>`
+    : `<div class="hint">More than one port is live, and the router does not say which device is on which, so no port is claimed per device.</div>`;
+  return `<div class="panel" style="margin-bottom:14px">
+    <h3 style="margin:0 0 8px">Router ports <span class="hint" style="font-weight:400">— ${esc(rt.backend || "")}</span></h3>
+    <div>${cells}</div>${sole}
+  </div>`;
 }
 
 function renderDevices() {

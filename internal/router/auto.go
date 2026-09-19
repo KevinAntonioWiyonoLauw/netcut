@@ -56,8 +56,13 @@ func (a *Auto) Host() string { return a.base }
 
 // candidates builds a fresh client per probe so no session state leaks between
 // attempts.
+//
+// Order matters: the ONT backend is tried first because these gateways serve an
+// HTML login page for unknown paths, which the JSON backends would report as a
+// confusing "not JSON" failure rather than "wrong backend".
 func (a *Auto) candidates() []Client {
 	return []Client{
+		NewHuaweiONT(a.base, a.cfg),
 		NewHuawei(a.base, a.cfg),
 		NewOpenWrt(a.base, a.cfg),
 	}

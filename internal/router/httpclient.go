@@ -24,6 +24,10 @@ type httpClient struct {
 	base string
 	c    *http.Client
 	cfg  Config
+	// cookieOverride replaces the Cookie header on every request. The legacy
+	// ONT firmware reads its session and language from that header rather than
+	// from a jar-managed cookie, so it has to be set verbatim.
+	cookieOverride string
 }
 
 func newHTTPClient(base string, cfg Config) (*httpClient, error) {
@@ -93,6 +97,9 @@ func (h *httpClient) do(ctx context.Context, method, path, contentType string, b
 	}
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("User-Agent", "netcut-router/1.0")
+	if h.cookieOverride != "" {
+		req.Header.Set("Cookie", h.cookieOverride)
+	}
 
 	resp, err := h.c.Do(req)
 	if err != nil {
@@ -150,4 +157,68 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ------------------------------------------------------------------ raw calls
+
+// doRaw performs a request and returns the status, headers and body without
+// decoding, for endpoints that answer with a non-JSON format. cookie, when set,
+// is sent as the Cookie header for this request only.
+func (h *httpClient) doRaw(ctx context.Context, method, path, contentType string,
+	body []byte, cookie string) (int, http.Header, []byte, error) {
+
+	req, err := http.NewRequestWithContext(ctx, method, h.base+path, bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	req.Header.Set("User-Agent", "netcut-router/1.0")
+	req.Header.Set("Accept", "*/*")
+	switch {
+	case cookie != "":
+		req.Header.Set("Cookie", cookie)
+	case h.cookieOverride != "":
+		req.Header.Set("Cookie", h.cookieOverride)
+	}
+
+	resp, err := h.c.Do(req)
+	if err != nil {
+		return 0, nil, nil, sanitise(err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return resp.StatusCode, resp.Header, nil, err
+	}
+	return resp.StatusCode, resp.Header, raw, nil
+}
+
+// getRaw fetches a path and returns the body verbatim.
+func (h *httpClient) getRaw(ctx context.Context, path string) ([]byte, error) {
+	status, _, body, err := h.doRaw(ctx, http.MethodGet, path, "", nil, "")
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("%s returned %d", path, status)
+	}
+	return body, nil
+}
+
+// getRawStatus is getRaw but also returns the status code.
+func (h *httpClient) getRawStatus(ctx context.Context, path string) (int, http.Header, []byte, error) {
+	return h.doRaw(ctx, http.MethodGet, path, "", nil, "")
+}
+
+// postFormRaw posts a form and returns the raw response. cookie, when set,
+// replaces the client's cookie header for this request.
+func (h *httpClient) postFormRaw(ctx context.Context, path string, form url.Values,
+	cookie string) (int, http.Header, []byte, error) {
+
+	body := []byte(form.Encode())
+	return h.doRaw(ctx, http.MethodPost, path,
+		"application/x-www-form-urlencoded", body, cookie)
 }

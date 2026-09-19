@@ -109,6 +109,7 @@ Credentials are read-only: NetCut never changes router configuration.
 | Backend | For |
 |---|---|
 | `huawei` | Huawei home gateways (`/api/...` JSON API) |
+| `huawei-ont` | Huawei ONT / fibre gateways (legacy ASP pages, e.g. EG8145V5) |
 | `openwrt` | OpenWrt / LEDE, over ubus and iwinfo |
 | `none` | Disable polling |
 
@@ -120,6 +121,24 @@ Two design choices worth knowing:
   and are undocumented, so NetCut locates device records by finding MAC-shaped
   values and reads the surrounding fields by name pattern. An unfamiliar router
   still produces useful output.
+
+### What a router will and will not tell you
+
+Routers differ in how much they expose, and NetCut only reports what it can
+actually establish:
+
+| Router exposes | Result |
+|---|---|
+| The SSID or port per client | `wlan · <SSID>` or `lan · LAN1` per device |
+| Port state only (some ONTs) | The port list, plus a port label when exactly **one** port is live — in which case every wired device must be on it |
+| Nothing per device | `unknown`, with a banner saying why |
+
+Some ONT firmware, for example, reports that LAN1 and LAN4 are up but never says
+which client is on which. NetCut shows the port state and claims no port per
+device, rather than inventing an assignment.
+
+The router's own port panel appears above the device table, so the state it
+reports is always visible.
 
 Check it any time:
 
@@ -222,7 +241,7 @@ list. The essentials:
 | `NETCUT_SAMPLE_RETENTION` | `24h` | How much bandwidth history to keep. |
 | `NETCUT_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. |
 | `NETCUT_ROUTER_HOST` | — | Router address. Setting it enables link-type polling. |
-| `NETCUT_ROUTER_BACKEND` | `auto` | `auto`, `huawei`, `openwrt`, or `none`. |
+| `NETCUT_ROUTER_BACKEND` | `auto` | `auto`, `huawei`, `huawei-ont`, `openwrt`, or `none`. |
 | `NETCUT_ROUTER_USER` | — | Router management user. |
 | `NETCUT_ROUTER_PASSWORD` | — | Router management password. |
 | `NETCUT_ROUTER_INTERVAL` | `60s` | How often to poll the router. |
