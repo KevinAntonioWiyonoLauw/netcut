@@ -2,10 +2,10 @@
 
 // language: Go, file: internal/arp/capture_stub.go
 //
-// The engine's control-plane logic is portable, but the frame I/O is not:
-// on Linux it needs AF_PACKET with CAP_NET_RAW. That backend is not built
-// here, so on non-Windows platforms the agent reports the limitation clearly
-// instead of pretending to enforce anything.
+// The engine's control-plane logic is portable, but the frame I/O is not: on
+// Linux it needs AF_PACKET with CAP_NET_RAW. That backend is not built here,
+// so on non-Windows platforms the agent reports the limitation clearly instead
+// of pretending to enforce anything.
 package arp
 
 import (
@@ -28,3 +28,7 @@ type captureDevice interface {
 func openCapture(ifaceName string, ip net.IP, filter string) (captureDevice, error) {
 	return nil, ErrUnsupported
 }
+
+// CaptureAvailable reports whether a layer-2 capture backend exists on this
+// platform. It does not, so -check says so plainly.
+func CaptureAvailable() error { return ErrUnsupported }

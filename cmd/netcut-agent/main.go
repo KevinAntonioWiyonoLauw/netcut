@@ -144,7 +144,7 @@ func run(log *slog.Logger, o options) error {
 	}
 	if err := eng.Start(); err != nil {
 		if errors.Is(err, arp.ErrUnsupported) {
-			return fmt.Errorf("%w\n\nRun with -dry-run to verify discovery without enforcement.", err)
+			return fmt.Errorf("%w\n\nRun with -dry-run to verify discovery without enforcement, or run -check to see what is missing.", err)
 		}
 		return err
 	}
@@ -525,6 +525,25 @@ func runCheck(log *slog.Logger) int {
 	fmt.Printf("  version   %s\n", version.Version)
 	fmt.Printf("  os        %s/%s\n", runtime.GOOS, runtime.GOARCH)
 	fmt.Printf("  elevated  %v\n", isElevated())
+
+	// Enforcement needs two independent things: an elevated process and a
+	// loadable capture backend. Report both, because either one missing is the
+	// reason nothing is applied on the wire.
+	fmt.Println("\nenforcement prerequisites:")
+	if isElevated() {
+		fmt.Println("  [ok]   process is elevated")
+	} else {
+		fmt.Println("  [FAIL] not elevated - opening a capture device will be refused.")
+		fmt.Println("         Re-run from an Administrator prompt (Windows) or as root (Linux).")
+	}
+	if err := arp.CaptureAvailable(); err == nil {
+		fmt.Println("  [ok]   layer-2 capture backend is loadable")
+	} else {
+		fmt.Println("  [FAIL] no layer-2 capture backend:")
+		for _, line := range strings.Split(err.Error(), "\n") {
+			fmt.Printf("         %s\n", line)
+		}
+	}
 
 	ifaces, err := netinfo.Ifaces()
 	if err != nil {

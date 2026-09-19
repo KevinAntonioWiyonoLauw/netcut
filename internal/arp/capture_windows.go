@@ -90,20 +90,46 @@ var (
 // loadWpcap resolves wpcap.dll and every entry point once.
 func loadWpcap() error {
 	wpcapOnce.Do(func() {
-		candidates := []string{
-			`C:\Windows\System32\Npcap\wpcap.dll`,
-			`C:\Windows\System32\wpcap.dll`,
-			"wpcap.dll",
+		// Npcap can be installed with "WinPcap API-compatible mode" OFF, in
+		// which case wpcap.dll and Packet.dll live only in the Npcap directory
+		// and no copies are placed in System32 root.
+		//
+		// That matters because wpcap.dll imports Packet.dll by base name, and
+		// Windows resolves such an import against the already-loaded module
+		// list before searching any path. So loading Packet.dll by full path
+		// first satisfies the dependency; without it wpcap.dll fails with
+		// "The specified module could not be found" even though the file is
+		// sitting right there. Verified: errno 126 without, loads with.
+		dirs := []string{
+			`C:\Windows\System32\Npcap`,
+			`C:\Windows\System32`,
+			`C:\Program Files\Npcap`,
 		}
-		for _, c := range candidates {
-			dll := syscall.NewLazyDLL(c)
+
+		var lastErr error
+		for _, d := range dirs {
+			// Best effort: in a WinPcap-compatible install Packet.dll is
+			// already resolvable, and preloading is then a no-op.
+			_ = syscall.NewLazyDLL(d + `\Packet.dll`).Load()
+
+			dll := syscall.NewLazyDLL(d + `\wpcap.dll`)
 			if err := dll.Load(); err == nil {
 				wpcap = dll
 				break
+			} else {
+				lastErr = err
 			}
 		}
 		if wpcap == nil {
-			wpcapErr = fmt.Errorf("%w: wpcap.dll not found (install Npcap from https://npcap.com and enable the WinPcap API-compatible option)", ErrUnsupported)
+			// Last attempt through the default search order.
+			dll := syscall.NewLazyDLL("wpcap.dll")
+			if err := dll.Load(); err == nil {
+				wpcap = dll
+			}
+		}
+		if wpcap == nil {
+			wpcapErr = fmt.Errorf("%w: could not load wpcap.dll (%v). Install Npcap from https://npcap.com; if it is already installed, re-run its installer and tick \"Install Npcap in WinPcap API-compatible Mode\", or add %s to the PATH",
+				ErrUnsupported, lastErr, `C:\Windows\System32\Npcap`)
 			return
 		}
 
@@ -147,6 +173,13 @@ func loadWpcap() error {
 	})
 	return wpcapErr
 }
+
+// CaptureAvailable reports whether a layer-2 capture backend can be loaded.
+//
+// It exists so -check can tell the operator whether enforcement is even
+// possible on this machine, before they wonder why nothing is being applied.
+// It loads the library but opens no device and transmits nothing.
+func CaptureAvailable() error { return loadWpcap() }
 
 type pcapHandle struct {
 	p       unsafe.Pointer
